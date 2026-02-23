@@ -89,6 +89,9 @@ found:
   p->state = EMBRYO;
   p->pid = nextpid++;
 
+  // initialize tickets to default 1
+  p->tickets = 1;
+
   release(&ptable.lock);
 
   // Allocate kernel stack.
@@ -138,6 +141,7 @@ userinit(void)
   p->tf->eflags = FL_IF;
   p->tf->esp = PGSIZE;
   p->tf->eip = 0;  // beginning of initcode.S
+  p->tickets = 1;
 
   safestrcpy(p->name, "initcode", sizeof(p->name));
   p->cwd = namei("/");
@@ -214,6 +218,8 @@ fork(void)
 
   acquire(&ptable.lock);
 
+  // inherit ticket count from parent
+  np->tickets = curproc->tickets;
   np->state = RUNNABLE;
 
   release(&ptable.lock);
@@ -311,6 +317,29 @@ wait(void)
   }
 }
 
+int random(int max) {
+  // LCG 
+  static unsigned long next = 1;
+  next = next * 1103515245 + 12345;
+  return (unsigned)(next / 65536) % max;
+}
+
+// Set the tickets of the current process to n.
+// Return 0 on success, -1 on failure.
+int
+settickets(int n)
+{
+  acquire(&ptable.lock);
+  struct proc *p = myproc();
+  if (n < 1) {
+    release(&ptable.lock);
+    return -1;
+  }
+  p->tickets = n;
+  release(&ptable.lock);
+  return 0;
+}
+
 //PAGEBREAK: 42
 // Per-CPU process scheduler.
 // Each CPU calls scheduler() after setting itself up.
@@ -332,13 +361,30 @@ scheduler(void)
 
     // Loop over process table looking for process to run.
     acquire(&ptable.lock);
-    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-      if(p->state != RUNNABLE)
-        continue;
+    // sum the total number of tickets
+    int total_tickets = 0;
+    
+    for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+      if (p->state == RUNNABLE) {
+        total_tickets += p->tickets;
+      }
+    }
 
-      // Switch to chosen process.  It is the process's job
-      // to release ptable.lock and then reacquire it
-      // before jumping back to us.
+    if (total_tickets > 0) {
+      //random ticket
+      int winning_ticket = random(total_tickets);
+      
+      // find the process that holds the winning ticket
+      int current_ticket = 0;
+      for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+        if (p->state == RUNNABLE) {
+          current_ticket += p->tickets;
+          if (current_ticket > winning_ticket) {
+            break; // winning process
+          }
+        }
+      }
+
       c->proc = p;
       switchuvm(p);
       p->state = RUNNING;
@@ -350,6 +396,9 @@ scheduler(void)
       // It should have changed its p->state before coming back.
       c->proc = 0;
     }
+
+
+    // Lottery scheduling selects and ran a process above.
     release(&ptable.lock);
 
   }
